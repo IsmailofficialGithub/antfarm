@@ -1,4 +1,4 @@
-import { createAgentCronJob, deleteAgentCronJobs, listCronJobs, checkCronToolAvailable } from "./gateway-api.js";
+import { createAgentCronJob, deleteAgentCronJobs, listCronJobs } from "./gateway-api.js";
 import type { WorkflowSpec } from "./types.js";
 import { resolveAntfarmCli } from "./paths.js";
 import { getDb } from "../db.js";
@@ -23,19 +23,13 @@ The "input" field contains your FULLY RESOLVED task instructions. All template v
 
 Step 3 — After completing the work, format your output with KEY: value lines (e.g., STATUS: done, REPO: /path, BRANCH: name, etc.) as specified in the task instructions.
 
-Step 4 — Report completion. Write your full output to a temp file, then pipe it:
+Step 4 — Report completion. Pass your full output text:
 \`\`\`
-cat <<'ANTFARM_EOF' > /tmp/antfarm-step-output.txt
-STATUS: done
+node ${cli} step complete "<stepId>" "STATUS: done
 REPO: /path/to/repo
 BRANCH: feature-branch
-KEY: value
-...
-ANTFARM_EOF
-cat /tmp/antfarm-step-output.txt | node ${cli} step complete "<stepId>"
+..."
 \`\`\`
-
-IMPORTANT: Always write output to a file first, then pipe via stdin. Do NOT pass output as a command-line argument — complex output (JSON, multi-line text) gets mangled by shell escaping.
 
 This automatically: saves your output, merges KEY: value pairs into the run context, and advances the pipeline to the next step.
 
@@ -58,7 +52,7 @@ export async function setupAgentCrons(workflow: WorkflowSpec): Promise<void> {
     const agentId = `${workflow.id}/${agent.id}`;
     const prompt = buildAgentPrompt(workflow.id, agent.id);
 
-    const result = await createAgentCronJob({
+    await createAgentCronJob({
       name: cronName,
       schedule: { kind: "every", everyMs, anchorMs },
       sessionTarget: "isolated",
@@ -67,10 +61,6 @@ export async function setupAgentCrons(workflow: WorkflowSpec): Promise<void> {
       delivery: { mode: "none" },
       enabled: true,
     });
-
-    if (!result.ok) {
-      throw new Error(`Failed to create cron job for agent "${agent.id}": ${result.error}`);
-    }
   }
 }
 
@@ -107,13 +97,6 @@ async function workflowCronsExist(workflowId: string): Promise<boolean> {
  */
 export async function ensureWorkflowCrons(workflow: WorkflowSpec): Promise<void> {
   if (await workflowCronsExist(workflow.id)) return;
-
-  // Preflight: verify cron tool is accessible before attempting to create jobs
-  const preflight = await checkCronToolAvailable();
-  if (!preflight.ok) {
-    throw new Error(preflight.error!);
-  }
-
   await setupAgentCrons(workflow);
 }
 
