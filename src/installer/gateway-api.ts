@@ -48,11 +48,19 @@ export async function createAgentCronJob(job: {
     const response = await fetch(`${gateway.url}/tools/invoke`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ tool: "cron", args: { action: "add", job } }),
+      body: JSON.stringify({ tool: "cron", args: { action: "add", job }, sessionKey: "global" }),
     });
 
     if (!response.ok) {
       const text = await response.text();
+      if (response.status === 404) {
+        return {
+          ok: false,
+          error: `The 'cron' tool is not available via the OpenClaw HTTP API (404). `
+            + `This usually means your tool policy restricts access. `
+            + `Check your tools.profile or tools.allow configuration in openclaw.json.`,
+        };
+      }
       return { ok: false, error: `Gateway returned ${response.status}: ${text}` };
     }
 
@@ -66,6 +74,41 @@ export async function createAgentCronJob(job: {
   }
 }
 
+/**
+ * Preflight check: verify the cron tool is accessible via /tools/invoke.
+ * Returns { ok: true } if accessible, or { ok: false, error } with a helpful message.
+ */
+export async function checkCronToolAvailable(): Promise<{ ok: boolean; error?: string }> {
+  const gateway = await getGatewayConfig();
+  try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (gateway.token) headers["Authorization"] = `Bearer ${gateway.token}`;
+
+    const response = await fetch(`${gateway.url}/tools/invoke`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ tool: "cron", args: { action: "list" } }),
+    });
+
+    if (response.status === 404) {
+      return {
+        ok: false,
+        error: `Cannot create cron jobs: the 'cron' tool is not available via the OpenClaw HTTP API. `
+          + `Check your tools.profile or tools.allow configuration in openclaw.json.`,
+      };
+    }
+
+    if (!response.ok) {
+      const text = await response.text();
+      return { ok: false, error: `Gateway returned ${response.status}: ${text}` };
+    }
+
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: `Cannot reach OpenClaw gateway: ${err}` };
+  }
+}
+
 export async function listCronJobs(): Promise<{ ok: boolean; jobs?: Array<{ id: string; name: string }>; error?: string }> {
   const gateway = await getGatewayConfig();
 
@@ -76,7 +119,7 @@ export async function listCronJobs(): Promise<{ ok: boolean; jobs?: Array<{ id: 
     const response = await fetch(`${gateway.url}/tools/invoke`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ tool: "cron", args: { action: "list" } }),
+      body: JSON.stringify({ tool: "cron", args: { action: "list" }, sessionKey: "global" }),
     });
 
     if (!response.ok) {
@@ -117,7 +160,7 @@ export async function deleteCronJob(jobId: string): Promise<{ ok: boolean; error
     const response = await fetch(`${gateway.url}/tools/invoke`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ tool: "cron", args: { action: "remove", id: jobId } }),
+      body: JSON.stringify({ tool: "cron", args: { action: "remove", id: jobId }, sessionKey: "global" }),
     });
 
     if (!response.ok) {
