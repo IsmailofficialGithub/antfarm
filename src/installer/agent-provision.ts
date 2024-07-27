@@ -7,7 +7,6 @@ import { writeWorkflowFile } from "./workspace-files.js";
 export type ProvisionedAgent = {
   id: string;
   name?: string;
-  model?: string;
   workspaceDir: string;
   agentDir: string;
 };
@@ -85,7 +84,6 @@ export async function provisionAgents(params: {
     results.push({
       id: `${params.workflow.id}/${agent.id}`,
       name: agent.name,
-      model: agent.model,
       workspaceDir,
       agentDir,
     });
