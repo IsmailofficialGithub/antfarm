@@ -3,20 +3,59 @@ import path from "node:path";
 import { fetchWorkflow } from "./workflow-fetch.js";
 import { loadWorkflowSpec } from "./workflow-spec.js";
 import { provisionAgents } from "./agent-provision.js";
-import { readOpenClawConfig, writeOpenClawConfig } from "./openclaw-config.js";
+import { readOpenClawConfig, writeOpenClawConfig, type OpenClawConfig } from "./openclaw-config.js";
 import { updateMainAgentGuidance } from "./main-agent-guidance.js";
 import { addSubagentAllowlist } from "./subagent-allowlist.js";
 import { installAntfarmSkill } from "./skill-install.js";
 import type { AgentRole, WorkflowInstallResult, WorkflowSpec } from "./types.js";
 
-function ensureAgentList(config: { agents?: { list?: Array<Record<string, unknown>> } }) {
+function ensureAgentList(config: { agents?: { list?: Array<Record<string, unknown>>; defaults?: Record<string, unknown> } }) {
   if (!config.agents) config.agents = {};
   if (!Array.isArray(config.agents.list)) config.agents.list = [];
   return config.agents.list;
 }
 
+/**
+ * Ensure the user's main agent is explicitly in the list with `default: true`.
+ * Without this, adding workflow agents to an empty list makes the first workflow
+ * agent the default — hijacking the user's main session (issue #41).
+ */
+function ensureMainAgentInList(
+  list: Array<Record<string, unknown>>,
+  config: { agents?: { defaults?: Record<string, unknown> } },
+) {
+  // If any entry already has default: true, the user has configured routing — don't touch it
+  if (list.some((entry) => entry.default === true)) return;
+
+  // If "main" agent already exists in the list, just mark it as default
+  const existing = list.find((entry) => entry.id === "main");
+  if (existing) {
+    existing.default = true;
+    return;
+  }
+
+  // Main agent isn't in the list — add a minimal entry so it stays the default.
+  // Respect workspace from agents.defaults if set; otherwise use the standard path.
+  const workspace = (config.agents?.defaults as Record<string, unknown>)?.workspace as string | undefined;
+  const entry: Record<string, unknown> = {
+    id: "main",
+    name: "Main",
+    default: true,
+  };
+  if (workspace) entry.workspace = workspace;
+  list.unshift(entry);
+}
+
 // ── Shared deny list: things no workflow agent should ever touch ──
 const ALWAYS_DENY = ["gateway", "cron", "message", "nodes", "canvas", "sessions_spawn", "sessions_send"];
+
+const DEFAULT_CRON_SESSION_RETENTION = "24h";
+const DEFAULT_SESSION_MAINTENANCE = {
+  mode: "enforce",
+  pruneAfter: "7d",
+  maxEntries: 500,
+  rotateBytes: "10mb",
+} as const;
 
 /**
  * Per-role tool policies using OpenClaw's profile + allow/deny system.
@@ -122,11 +161,39 @@ function buildToolsConfig(role: AgentRole): Record<string, unknown> {
   return tools;
 }
 
+function ensureCronSessionRetention(config: OpenClawConfig): void {
+  if (!config.cron) config.cron = {};
+  if (config.cron.sessionRetention === undefined) {
+    config.cron.sessionRetention = DEFAULT_CRON_SESSION_RETENTION;
+  }
+}
+
+function ensureSessionMaintenance(config: OpenClawConfig): void {
+  if (!config.session) config.session = {};
+  if (!config.session.maintenance) {
+    config.session.maintenance = { ...DEFAULT_SESSION_MAINTENANCE };
+    return;
+  }
+  const maintenance = config.session.maintenance;
+  if (maintenance.mode === undefined) maintenance.mode = DEFAULT_SESSION_MAINTENANCE.mode;
+  if (maintenance.pruneAfter === undefined && maintenance.pruneDays === undefined) {
+    maintenance.pruneAfter = DEFAULT_SESSION_MAINTENANCE.pruneAfter;
+  }
+  if (maintenance.maxEntries === undefined) {
+    maintenance.maxEntries = DEFAULT_SESSION_MAINTENANCE.maxEntries;
+  }
+  if (maintenance.rotateBytes === undefined) {
+    maintenance.rotateBytes = DEFAULT_SESSION_MAINTENANCE.rotateBytes;
+  }
+}
+
 function upsertAgent(
   list: Array<Record<string, unknown>>,
   agent: { id: string; name?: string; model?: string; workspaceDir: string; agentDir: string; role: AgentRole },
 ) {
   const existing = list.find((entry) => entry.id === agent.id);
+  // Never overwrite the user's default (main) agent — it was configured outside antfarm.
+  if (existing?.default === true) return;
   const payload: Record<string, unknown> = {
     id: agent.id,
     name: agent.name ?? agent.id,
@@ -157,7 +224,10 @@ export async function installWorkflow(params: { workflowId: string }): Promise<W
   }
 
   const { path: configPath, config } = await readOpenClawConfig();
+  ensureCronSessionRetention(config);
+  ensureSessionMaintenance(config);
   const list = ensureAgentList(config);
+  ensureMainAgentInList(list, config);
   addSubagentAllowlist(config, provisioned.map((a) => a.id));
   for (const agent of provisioned) {
     // Extract the local agent id (after the workflow prefix slash)

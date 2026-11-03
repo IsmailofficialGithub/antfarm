@@ -22,6 +22,7 @@ export type WorkflowAgent = {
   description?: string;
   role?: AgentRole;
   model?: string;
+  timeoutSeconds?: number;
   workspace: WorkflowAgentFiles;
 };
 
@@ -72,6 +73,9 @@ export type WorkflowSpec = {
   agents: WorkflowAgent[];
   steps: WorkflowStep[];
   context?: Record<string, string>;
+  notifications?: {
+    url?: string;
+  };
 };
 
 export type WorkflowInstallResult = {
