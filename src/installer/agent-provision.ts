@@ -7,8 +7,6 @@ import { writeWorkflowFile } from "./workspace-files.js";
 export type ProvisionedAgent = {
   id: string;
   name?: string;
-  model?: string;
-  timeoutSeconds?: number;
   workspaceDir: string;
   agentDir: string;
 };
@@ -37,7 +35,6 @@ function resolveWorkspaceDir(params: {
 export async function provisionAgents(params: {
   workflow: WorkflowSpec;
   workflowDir: string;
-  bundledSourceDir?: string;
   overwriteFiles?: boolean;
   installSkill?: boolean;
 }): Promise<ProvisionedAgent[]> {
@@ -54,22 +51,11 @@ export async function provisionAgents(params: {
     await ensureDir(workspaceDir);
 
     for (const [fileName, relativePath] of Object.entries(agent.workspace.files)) {
-      // Try the installed workflow dir first, then fall back to the bundled source
-      // (handles relative paths like ../../agents/shared/ that escape the workflow dir)
-      let source = path.resolve(params.workflowDir, relativePath);
+      const source = path.join(params.workflowDir, relativePath);
       try {
         await fs.access(source);
       } catch {
-        if (params.bundledSourceDir) {
-          source = path.resolve(params.bundledSourceDir, relativePath);
-          try {
-            await fs.access(source);
-          } catch {
-            throw new Error(`Missing bootstrap file for agent "${agent.id}": ${relativePath}`);
-          }
-        } else {
-          throw new Error(`Missing bootstrap file for agent "${agent.id}": ${relativePath}`);
-        }
+        throw new Error(`Missing bootstrap file for agent "${agent.id}": ${relativePath}`);
       }
       const destination = path.join(workspaceDir, fileName);
       await writeWorkflowFile({ destination, source, overwrite });
@@ -80,14 +66,12 @@ export async function provisionAgents(params: {
       await ensureDir(skillsDir);
     }
 
-    const agentDir = resolveAgentDir(`${params.workflow.id}_${agent.id}`);
+    const agentDir = resolveAgentDir(`${params.workflow.id}-${agent.id}`);
     await ensureDir(agentDir);
 
     results.push({
-      id: `${params.workflow.id}_${agent.id}`,
+      id: `${params.workflow.id}/${agent.id}`,
       name: agent.name,
-      model: agent.model,
-      timeoutSeconds: agent.timeoutSeconds,
       workspaceDir,
       agentDir,
     });
@@ -95,62 +79,9 @@ export async function provisionAgents(params: {
 
   if (params.installSkill !== false) {
     await installWorkflowSkill(params.workflow, params.workflowDir);
-    await installExternalSkills(params.workflow);
   }
 
   return results;
-}
-
-/**
- * Resolve the source directory for an external skill by checking user skill directories.
- * Returns the path if found, or null if not found.
- */
-async function resolveExternalSkillSource(skillName: string): Promise<string | null> {
-  const home = process.env.HOME || process.env.USERPROFILE || "";
-  const candidates = [
-    path.join(home, ".openclaw", "workspace", "skills", skillName),
-    path.join(home, ".openclaw", "skills", skillName),
-  ];
-  for (const candidate of candidates) {
-    try {
-      await fs.access(candidate);
-      return candidate;
-    } catch {
-      // not found, try next
-    }
-  }
-  return null;
-}
-
-/**
- * Install external skills (non-bundled) from user skill directories into agent workspaces.
- * Skips bundled skills like "antfarm-workflows" which are handled separately.
- */
-async function installExternalSkills(workflow: WorkflowSpec): Promise<void> {
-  const bundledSkills = new Set(["antfarm-workflows"]);
-
-  for (const agent of workflow.agents) {
-    if (!agent.workspace.skills?.length) continue;
-
-    const externalSkills = agent.workspace.skills.filter(s => !bundledSkills.has(s));
-    if (externalSkills.length === 0) continue;
-
-    const workspaceDir = resolveWorkspaceDir({ workflowId: workflow.id, agent });
-    const skillsDir = path.join(workspaceDir, "skills");
-    await ensureDir(skillsDir);
-
-    for (const skillName of externalSkills) {
-      const source = await resolveExternalSkillSource(skillName);
-      if (!source) {
-        // Warn but don't fail — skill may be optional or installed later
-        console.warn(`[antfarm] Skill "${skillName}" not found for agent "${agent.id}", skipping`);
-        continue;
-      }
-      const destination = path.join(skillsDir, skillName);
-      await fs.rm(destination, { recursive: true, force: true });
-      await fs.cp(source, destination, { recursive: true });
-    }
-  }
 }
 
 async function installWorkflowSkill(workflow: WorkflowSpec, workflowDir: string) {
