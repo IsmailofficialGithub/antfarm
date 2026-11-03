@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { execSync } from "node:child_process";
 import { readOpenClawConfig, writeOpenClawConfig } from "./openclaw-config.js";
 import { removeMainAgentGuidance } from "./main-agent-guidance.js";
 import {
@@ -58,6 +59,7 @@ function removeRunRecords(workflowId: string): void {
     const db = getDb();
     const runs = db.prepare("SELECT id FROM runs WHERE workflow_id = ?").all(workflowId) as Array<{ id: string }>;
     for (const run of runs) {
+      db.prepare("DELETE FROM stories WHERE run_id = ?").run(run.id);
       db.prepare("DELETE FROM steps WHERE run_id = ?").run(run.id);
     }
     db.prepare("DELETE FROM runs WHERE workflow_id = ?").run(workflowId);
@@ -195,5 +197,27 @@ export async function uninstallAllWorkflows(): Promise<void> {
     if (entries.length === 0) {
       await fs.rm(antfarmRoot, { recursive: true, force: true });
     }
+  }
+
+  // Remove CLI symlink from ~/.local/bin
+  const { removeCliSymlink } = await import("./symlink.js");
+  removeCliSymlink();
+
+  // Remove npm link, build output, and node_modules.
+  // Note: this deletes dist/ which contains the currently running code.
+  // Safe because this is the final operation in the function.
+  const projectRoot = path.resolve(import.meta.dirname, "..", "..");
+  try {
+    execSync("npm unlink -g", { cwd: projectRoot, stdio: "ignore" });
+  } catch {
+    // link may not exist
+  }
+  const distDir = path.join(projectRoot, "dist");
+  if (await pathExists(distDir)) {
+    await fs.rm(distDir, { recursive: true, force: true });
+  }
+  const nodeModulesDir = path.join(projectRoot, "node_modules");
+  if (await pathExists(nodeModulesDir)) {
+    await fs.rm(nodeModulesDir, { recursive: true, force: true });
   }
 }

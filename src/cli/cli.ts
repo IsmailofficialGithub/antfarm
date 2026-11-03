@@ -7,11 +7,13 @@ import { listBundledWorkflows } from "../installer/workflow-fetch.js";
 import { readRecentLogs } from "../lib/logger.js";
 import { startDaemon, stopDaemon, getDaemonStatus, isRunning } from "../server/daemonctl.js";
 import { claimStep, completeStep, failStep, getStories } from "../installer/step-ops.js";
+import { ensureCliSymlink } from "../installer/symlink.js";
 
 function printUsage() {
   process.stdout.write(
     [
-      "antfarm install                      Install all bundled workflows + agent crons",
+      "antfarm install                      Install all bundled workflows",
+      "antfarm uninstall [--force]          Full uninstall (workflows, agents, crons, DB)",
       "",
       "antfarm workflow list                List available workflows",
       "antfarm workflow install <name>      Install a workflow",
@@ -20,6 +22,7 @@ function printUsage() {
       "antfarm workflow run <name> <task>   Start a workflow run",
       "antfarm workflow status <query>      Check run status (task substring, run ID prefix)",
       "antfarm workflow runs                List all workflow runs",
+      "antfarm workflow resume <run-id>     Resume a failed run from where it left off",
       "",
       "antfarm dashboard [start] [--port N]   Start dashboard daemon (default: 3333)",
       "antfarm dashboard stop                  Stop dashboard daemon",
@@ -39,6 +42,29 @@ async function main() {
   const args = process.argv.slice(2);
   const [group, action, target] = args;
 
+  if (group === "uninstall" && (!args[1] || args[1] === "--force")) {
+    const force = args.includes("--force");
+    const activeRuns = checkActiveRuns();
+    if (activeRuns.length > 0 && !force) {
+      process.stderr.write(`Cannot uninstall: ${activeRuns.length} active run(s):\n`);
+      for (const run of activeRuns) {
+        process.stderr.write(`  - ${run.id} (${run.workflow_id}): ${run.task}\n`);
+      }
+      process.stderr.write(`\nUse --force to uninstall anyway.\n`);
+      process.exit(1);
+    }
+
+    // Stop dashboard if running
+    if (isRunning().running) {
+      stopDaemon();
+      console.log("Dashboard stopped.");
+    }
+
+    await uninstallAllWorkflows();
+    console.log("Antfarm fully uninstalled (workflows, agents, crons, database, skill).");
+    return;
+  }
+
   if (group === "install" && !args[1]) {
     const workflows = await listBundledWorkflows();
     if (workflows.length === 0) { console.log("No bundled workflows found."); return; }
@@ -52,6 +78,7 @@ async function main() {
         console.log(`  ✗ ${workflowId}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    ensureCliSymlink();
     console.log(`\nDone. Start a workflow with: antfarm workflow run <name> "your task"`);
 
     // Auto-start dashboard if not already running
@@ -188,7 +215,7 @@ async function main() {
 
   if (action === "install") {
     const result = await installWorkflow({ workflowId: target });
-    process.stdout.write(`Installed workflow: ${result.workflowId}\nAgent cron jobs created.\n`);
+    process.stdout.write(`Installed workflow: ${result.workflowId}\nAgent crons will start when a run begins.\n`);
     process.stdout.write(`\nStart with: antfarm workflow run ${result.workflowId} "your task"\n`);
     return;
   }
@@ -237,6 +264,69 @@ async function main() {
       }
     }
     process.stdout.write(lines.join("\n") + "\n");
+    return;
+  }
+
+  if (action === "resume") {
+    if (!target) { process.stderr.write("Missing run-id.\n"); printUsage(); process.exit(1); }
+    const db = (await import("../db.js")).getDb();
+
+    // Find the run (support prefix match)
+    const run = db.prepare(
+      "SELECT id, workflow_id, status FROM runs WHERE id = ? OR id LIKE ?"
+    ).get(target, `${target}%`) as { id: string; workflow_id: string; status: string } | undefined;
+
+    if (!run) { process.stderr.write(`Run not found: ${target}\n`); process.exit(1); }
+    if (run.status !== "failed") {
+      process.stderr.write(`Run ${run.id.slice(0, 8)} is "${run.status}", not "failed". Nothing to resume.\n`);
+      process.exit(1);
+    }
+
+    // Find the failed step (or first non-done step)
+    const failedStep = db.prepare(
+      "SELECT id, step_id, type, current_story_id FROM steps WHERE run_id = ? AND status = 'failed' ORDER BY step_index ASC LIMIT 1"
+    ).get(run.id) as { id: string; step_id: string; type: string; current_story_id: string | null } | undefined;
+
+    if (!failedStep) {
+      process.stderr.write(`No failed step found in run ${run.id.slice(0, 8)}.\n`);
+      process.exit(1);
+    }
+
+    // If it's a loop step with a failed story, reset that story to pending
+    if (failedStep.type === "loop") {
+      const failedStory = db.prepare(
+        "SELECT id FROM stories WHERE run_id = ? AND status = 'failed' ORDER BY story_index ASC LIMIT 1"
+      ).get(run.id) as { id: string } | undefined;
+      if (failedStory) {
+        db.prepare(
+          "UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE id = ?"
+        ).run(failedStory.id);
+      }
+    }
+
+    // Reset step to pending
+    db.prepare(
+      "UPDATE steps SET status = 'pending', current_story_id = NULL, updated_at = datetime('now') WHERE id = ?"
+    ).run(failedStep.id);
+
+    // Reset run to running
+    db.prepare(
+      "UPDATE runs SET status = 'running', updated_at = datetime('now') WHERE id = ?"
+    ).run(run.id);
+
+    // Ensure crons are running for this workflow
+    const { loadWorkflowSpec } = await import("../installer/workflow-spec.js");
+    const { resolveWorkflowDir } = await import("../installer/paths.js");
+    const { ensureWorkflowCrons } = await import("../installer/agent-cron.js");
+    try {
+      const workflowDir = resolveWorkflowDir(run.workflow_id);
+      const workflow = await loadWorkflowSpec(workflowDir);
+      await ensureWorkflowCrons(workflow);
+    } catch (err) {
+      process.stderr.write(`Warning: Could not start crons: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+
+    console.log(`Resumed run ${run.id.slice(0, 8)} from step "${failedStep.step_id}"`);
     return;
   }
 
