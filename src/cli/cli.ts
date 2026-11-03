@@ -1,10 +1,27 @@
 #!/usr/bin/env node
+
+// Runtime check: node:sqlite requires Node.js >= 22 (real Node, not Bun's wrapper)
+try {
+  await import("node:sqlite");
+} catch {
+  console.error(
+    `Error: node:sqlite is not available.\n\n` +
+    `Antfarm requires Node.js >= 22 with native SQLite support.\n` +
+    `If you have Bun installed, its \`node\` wrapper does not support node:sqlite via ESM.\n\n` +
+    `Fix: ensure the real Node.js 22+ is first on your PATH.\n` +
+    `  Check: node -e "require('node:sqlite')"\n` +
+    `  See: https://github.com/snarktank/antfarm/issues/54`
+  );
+  process.exit(1);
+}
+
 import { installWorkflow } from "../installer/install.js";
 import { uninstallAllWorkflows, uninstallWorkflow, checkActiveRuns } from "../installer/uninstall.js";
 import { getWorkflowStatus, listRuns } from "../installer/status.js";
 import { runWorkflow } from "../installer/run.js";
 import { listBundledWorkflows } from "../installer/workflow-fetch.js";
 import { readRecentLogs } from "../lib/logger.js";
+import { getRecentEvents, getRunEvents, type AntfarmEvent } from "../installer/events.js";
 import { startDaemon, stopDaemon, getDaemonStatus, isRunning } from "../server/daemonctl.js";
 import { claimStep, completeStep, failStep, getStories } from "../installer/step-ops.js";
 import { ensureCliSymlink } from "../installer/symlink.js";
@@ -23,6 +40,44 @@ function getVersion(): string {
     return pkg.version ?? "unknown";
   } catch {
     return "unknown";
+  }
+}
+
+function formatEventTime(ts: string): string {
+  const d = new Date(ts);
+  return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
+}
+
+function formatEventLabel(evt: AntfarmEvent): string {
+  const labels: Record<string, string> = {
+    "run.started": "Run started",
+    "run.completed": "Run completed",
+    "run.failed": "Run failed",
+    "step.pending": "Step pending",
+    "step.running": "Claimed step",
+    "step.done": "Step completed",
+    "step.failed": "Step failed",
+    "step.timeout": "Step timed out",
+    "story.started": "Story started",
+    "story.done": "Story done",
+    "story.verified": "Story verified",
+    "story.retry": "Story retry",
+    "story.failed": "Story failed",
+    "pipeline.advanced": "Pipeline advanced",
+  };
+  return labels[evt.event] ?? evt.event;
+}
+
+function printEvents(events: AntfarmEvent[]): void {
+  if (events.length === 0) { console.log("No events yet."); return; }
+  for (const evt of events) {
+    const time = formatEventTime(evt.ts);
+    const agent = evt.agentId ? `  ${evt.agentId.split("/").pop()}` : "";
+    const label = formatEventLabel(evt);
+    const story = evt.storyTitle ? ` — ${evt.storyTitle}` : "";
+    const detail = evt.detail ? ` (${evt.detail})` : "";
+    const run = evt.runId ? `  [${evt.runId.slice(0, 8)}]` : "";
+    console.log(`${time}${run}${agent}  ${label}${story}${detail}`);
   }
 }
 
@@ -50,7 +105,8 @@ function printUsage() {
       "antfarm step fail <step-id> <error>  Fail step with retry logic",
       "antfarm step stories <run-id>       List stories for a run",
       "",
-      "antfarm logs [<lines>]               Show recent log entries",
+      "antfarm logs [<lines>]               Show recent activity (from events)",
+      "antfarm logs <run-id>                Show activity for a specific run",
       "",
       "antfarm version                      Show installed version",
       "antfarm update                       Pull latest, rebuild, and reinstall workflows",
@@ -64,6 +120,12 @@ async function main() {
 
   if (group === "version" || group === "--version" || group === "-v") {
     console.log(`antfarm v${getVersion()}`);
+    return;
+  }
+
+  if (group === "ant") {
+    const { printAnt } = await import("./ant.js");
+    printAnt();
     return;
   }
 
@@ -248,9 +310,20 @@ async function main() {
   }
 
   if (group === "logs") {
-    const lines = parseInt(args[1], 10) || 50;
-    const logs = await readRecentLogs(lines);
-    if (logs.length === 0) { console.log("No logs yet."); } else { for (const line of logs) console.log(line); }
+    const arg = args[1];
+    if (arg && !/^\d+$/.test(arg)) {
+      // Looks like a run ID (or prefix)
+      const events = getRunEvents(arg);
+      if (events.length === 0) {
+        console.log(`No events found for run matching "${arg}".`);
+      } else {
+        printEvents(events);
+      }
+      return;
+    }
+    const limit = parseInt(arg, 10) || 50;
+    const events = getRecentEvents(limit);
+    printEvents(events);
     return;
   }
 
@@ -367,6 +440,9 @@ async function main() {
           "UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE id = ?"
         ).run(failedStory.id);
       }
+      db.prepare(
+        "UPDATE steps SET retry_count = 0 WHERE run_id = ? AND type = 'loop'"
+      ).run(run.id);
     }
 
     // Check if the failed step is a verify step linked to a loop step's verify_each
@@ -379,11 +455,11 @@ async function main() {
       if (lc.verifyEach && lc.verifyStep === failedStep.step_id) {
         // Reset the loop step (developer) to pending so it re-claims the story and populates context
         db.prepare(
-          "UPDATE steps SET status = 'pending', current_story_id = NULL, updated_at = datetime('now') WHERE id = ?"
+          "UPDATE steps SET status = 'pending', current_story_id = NULL, retry_count = 0, updated_at = datetime('now') WHERE id = ?"
         ).run(loopStep.id);
         // Reset verify step to waiting (fires after developer completes)
         db.prepare(
-          "UPDATE steps SET status = 'waiting', current_story_id = NULL, updated_at = datetime('now') WHERE id = ?"
+          "UPDATE steps SET status = 'waiting', current_story_id = NULL, retry_count = 0, updated_at = datetime('now') WHERE id = ?"
         ).run(failedStep.id);
         // Reset any failed stories to pending
         db.prepare(
@@ -414,7 +490,7 @@ async function main() {
 
     // Reset step to pending
     db.prepare(
-      "UPDATE steps SET status = 'pending', current_story_id = NULL, updated_at = datetime('now') WHERE id = ?"
+      "UPDATE steps SET status = 'pending', current_story_id = NULL, retry_count = 0, updated_at = datetime('now') WHERE id = ?"
     ).run(failedStep.id);
 
     // Reset run to running
@@ -439,9 +515,16 @@ async function main() {
   }
 
   if (action === "run") {
-    const taskTitle = args.slice(3).join(" ").trim();
+    let notifyUrl: string | undefined;
+    const runArgs = args.slice(3);
+    const nuIdx = runArgs.indexOf("--notify-url");
+    if (nuIdx !== -1) {
+      notifyUrl = runArgs[nuIdx + 1];
+      runArgs.splice(nuIdx, 2);
+    }
+    const taskTitle = runArgs.join(" ").trim();
     if (!taskTitle) { process.stderr.write("Missing task title.\n"); printUsage(); process.exit(1); }
-    const run = await runWorkflow({ workflowId: target, taskTitle });
+    const run = await runWorkflow({ workflowId: target, taskTitle, notifyUrl });
     process.stdout.write(
       [`Run: ${run.id}`, `Workflow: ${run.workflowId}`, `Task: ${run.task}`, `Status: ${run.status}`].join("\n") + "\n",
     );
