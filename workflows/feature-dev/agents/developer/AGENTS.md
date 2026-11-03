@@ -25,30 +25,17 @@ You are a developer on a feature development workflow. Your job is to implement 
 - Handle edge cases and errors
 - Don't leave TODOs or incomplete work - finish what you start
 
-## Testing — Required Per Story
+## Testing
 
-You MUST write tests for every story you implement. Testing is not optional.
-
-- Write unit tests that verify your story's functionality
+- Write tests that verify your changes work
 - Cover the main functionality and key edge cases
 - Run existing tests to make sure you didn't break anything
-- Run your new tests to confirm they pass
-- The verifier will check that tests exist and pass — don't skip this
-
-## Security — Pre-Commit Checks
-
-Before EVERY commit, verify:
-1. `.gitignore` exists — if not, create one appropriate for the project stack
-2. Run `git diff --cached --name-only` and check for sensitive files
-3. **NEVER stage or commit:** `.env`, `*.key`, `*.pem`, `*.secret`, `credentials.*`, `node_modules/`, `.env.local`
-4. If you need env vars, use `.env.example` with placeholder values — never real credentials
-5. If a sensitive file is staged, `git reset HEAD <file>` before committing
 
 ## Commits
 
 - One logical change per commit when possible
 - Clear commit message explaining what and why
-- Include all relevant files (except those excluded by .gitignore)
+- Include all relevant files
 
 ## Creating PRs
 
@@ -67,67 +54,6 @@ COMMITS: abc123, def456
 CHANGES: What you implemented
 TESTS: What tests you wrote
 ```
-
-## Story-Based Execution
-
-You work on **ONE user story per session**. A fresh session is started for each story. You have no memory of previous sessions except what's in `progress-{{run_id}}.txt`.
-
-### Each Session
-
-1. Read `progress-{{run_id}}.txt` — especially the **Codebase Patterns** section at the top
-2. Check the branch, pull latest
-3. Implement the story described in your task input
-4. Run quality checks (`npm run build`, typecheck, etc.)
-5. Commit: `feat: <story-id> - <story-title>`
-6. Update `progress-{{run_id}}.txt` by rewriting the entire file (do not use `edit`)
-7. Update **Codebase Patterns** in `progress-{{run_id}}.txt` if you found reusable patterns
-8. Update `AGENTS.md` if you learned something structural about the codebase
-
-### progress.txt Format
-
-If `progress.txt` doesn't exist yet, create it with this header:
-
-```markdown
-# Progress Log
-Run: <run-id>
-Task: <task description>
-Started: <timestamp>
-
-## Codebase Patterns
-(add patterns here as you discover them)
-
----
-```
-
-After completing a story, **rewrite** `progress-{{run_id}}.txt` to include this block:
-
-```markdown
-## <date/time> - <story-id>: <title>
-- What was implemented
-- Files changed
-- **Learnings:** codebase patterns, gotchas, useful context
----
-```
-
-### Codebase Patterns
-
-If you discover a reusable pattern, add it to the `## Codebase Patterns` section at the **TOP** of `progress-{{run_id}}.txt`. Only add patterns that are general and reusable, not story-specific. Examples:
-- "This project uses `node:sqlite` DatabaseSync, not async"
-- "All API routes are in `src/server/dashboard.ts`"
-- "Tests use node:test, run with `node --test`"
-
-### AGENTS.md Updates
-
-If you discover something structural (not story-specific), add it to your `AGENTS.md`:
-- Project stack/framework
-- How to run tests
-- Key file locations
-- Dependencies between modules
-- Gotchas
-
-### Verify Feedback
-
-If the verifier rejects your work, you'll receive feedback in your task input. Address every issue the verifier raised before re-submitting.
 
 ## Learning
 

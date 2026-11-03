@@ -5,19 +5,16 @@ import { readOpenClawConfig } from "./openclaw-config.js";
 const WORKFLOW_BLOCK_START = "<!-- antfarm:workflows -->";
 const WORKFLOW_BLOCK_END = "<!-- /antfarm:workflows -->";
 
-const CLI = "node ~/.openclaw/workspace/antfarm/dist/cli/cli.js";
-
 const TOOLS_BLOCK = `${WORKFLOW_BLOCK_START}
 # Antfarm Workflows
 
-Antfarm CLI (always use full path to avoid PATH issues):
-\`${CLI}\`
+Antfarm CLI is at: ~/.openclaw/workspace/antfarm/dist/cli/cli.js
 
 Commands:
-- Install: \`${CLI} workflow install <name>\`
-- Run: \`${CLI} workflow run <workflow-id> "<task>"\`
-- Status: \`${CLI} workflow status "<task title>"\`
-- Logs: \`${CLI} logs\`
+- Install: \`node <cli> workflow install <name>\`
+- Run: \`node <cli> workflow run <workflow-id> "<task>"\`
+- Status: \`node <cli> workflow status "<task title>"\`
+- Logs: \`node <cli> logs\`
 
 Workflows are self-advancing via per-agent cron jobs. No manual orchestration needed.
 ${WORKFLOW_BLOCK_END}
@@ -27,12 +24,12 @@ const AGENTS_BLOCK = `${WORKFLOW_BLOCK_START}
 # Antfarm Workflow Policy
 
 ## Installing Workflows
-Run: \`${CLI} workflow install <name>\`
+Run: \`cd ~/.openclaw/workspace/antfarm && node dist/cli/cli.js workflow install <name>\`
 Agent cron jobs are created automatically during install.
 
 ## Running Workflows
-- Start: \`${CLI} workflow run <workflow-id> "<task>"\`
-- Status: \`${CLI} workflow status "<task title>"\`
+- Start: \`antfarm workflow run <workflow-id> "<task>"\`
+- Status: \`antfarm workflow status "<task title>"\`
 - Workflows self-advance via agent cron jobs polling SQLite for pending steps.
 ${WORKFLOW_BLOCK_END}
 `;

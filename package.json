@@ -1,6 +1,6 @@
 {
   "name": "antfarm",
-  "version": "0.5.1",
+  "version": "0.1.0",
   "type": "module",
   "private": true,
   "engines": {
@@ -10,7 +10,7 @@
     "antfarm": "dist/cli/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && cp src/server/index.html dist/server/index.html && chmod +x dist/cli/cli.js && node scripts/inject-version.js",
+    "build": "tsc -p tsconfig.json",
     "start": "node dist/cli/cli.js"
   },
   "dependencies": {
@@ -19,6 +19,6 @@
   },
   "devDependencies": {
     "@types/node": "^25.2.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.7.3"
   }
 }

@@ -1,6 +1,5 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { execSync } from "node:child_process";
 import { readOpenClawConfig, writeOpenClawConfig } from "./openclaw-config.js";
 import { removeMainAgentGuidance } from "./main-agent-guidance.js";
 import {
@@ -16,65 +15,16 @@ import { uninstallAntfarmSkill } from "./skill-install.js";
 import { removeAgentCrons } from "./agent-cron.js";
 import { deleteAgentCronJobs } from "./gateway-api.js";
 import { getDb } from "../db.js";
-import { stopDaemon } from "../server/daemonctl.js";
 import type { WorkflowInstallResult } from "./types.js";
 
 function filterAgentList(
   list: Array<Record<string, unknown>>,
   workflowId: string,
 ): Array<Record<string, unknown>> {
-  const prefix = `${workflowId}_`;
+  const prefix = `${workflowId}/`;
   return list.filter((entry) => {
     const id = typeof entry.id === "string" ? entry.id : "";
     return !id.startsWith(prefix);
-  });
-}
-
-function isPathWithin(target: string, root: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(target));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-/**
- * Select only agents that are clearly Antfarm-managed.
- *
- * Primary signal: agent id is prefixed by an installed Antfarm workflow id.
- * Fallback signal (for partial/corrupt state): workspace is under
- * ~/.openclaw/workspaces/workflows/<workflow-id>/...
- */
-export function selectAntfarmManagedAgents(
-  list: Array<Record<string, unknown>>,
-  workflowIds: Iterable<string>,
-  workflowWorkspaceRoot = resolveWorkflowWorkspaceRoot(),
-): Array<Record<string, unknown>> {
-  const knownWorkflowIds = new Set(
-    Array.from(workflowIds)
-      .map((id) => id.trim())
-      .filter(Boolean),
-  );
-
-  return list.filter((entry) => {
-    const id = typeof entry.id === "string" ? entry.id : "";
-
-    for (const workflowId of knownWorkflowIds) {
-      if (id.startsWith(`${workflowId}_`)) {
-        return true;
-      }
-    }
-    const workspace = typeof entry.workspace === "string" ? entry.workspace : "";
-    if (!workspace) {
-      return false;
-    }
-
-    if (!isPathWithin(workspace, workflowWorkspaceRoot)) {
-      return false;
-    }
-    const relative = path.relative(path.resolve(workflowWorkspaceRoot), path.resolve(workspace));
-    const [workflowId] = relative.split(path.sep);
-    if (!workflowId) {
-      return false;
-    }
-    return id.startsWith(`${workflowId}_`);
   });
 }
 
@@ -87,51 +37,17 @@ async function pathExists(filePath: string): Promise<boolean> {
   }
 }
 
-const DEFAULT_CRON_SESSION_RETENTION = "24h";
-const DEFAULT_SESSION_MAINTENANCE = {
-  mode: "enforce",
-  pruneAfter: "7d",
-  maxEntries: 500,
-  rotateBytes: "10mb",
-} as const;
-
-function getActiveRuns(workflowId?: string): Array<{ id: string; workflow_id: string; task: string }> {
-  try {
-    const db = getDb();
-    if (workflowId) {
-      return db.prepare("SELECT id, workflow_id, task FROM runs WHERE workflow_id = ? AND status = 'running'").all(workflowId) as Array<{ id: string; workflow_id: string; task: string }>;
-    }
-    return db.prepare("SELECT id, workflow_id, task FROM runs WHERE status = 'running'").all() as Array<{ id: string; workflow_id: string; task: string }>;
-  } catch {
-    return [];
-  }
-}
-
-export function checkActiveRuns(workflowId?: string): Array<{ id: string; workflow_id: string; task: string }> {
-  return getActiveRuns(workflowId);
-}
-
 function removeRunRecords(workflowId: string): void {
   try {
     const db = getDb();
     const runs = db.prepare("SELECT id FROM runs WHERE workflow_id = ?").all(workflowId) as Array<{ id: string }>;
     for (const run of runs) {
-      db.prepare("DELETE FROM stories WHERE run_id = ?").run(run.id);
       db.prepare("DELETE FROM steps WHERE run_id = ?").run(run.id);
     }
     db.prepare("DELETE FROM runs WHERE workflow_id = ?").run(workflowId);
   } catch {
     // DB might not exist yet
   }
-}
-
-async function listInstalledWorkflowIds(): Promise<string[]> {
-  const workflowRoot = resolveWorkflowRoot();
-  if (!(await pathExists(workflowRoot))) {
-    return [];
-  }
-  const entries = await fs.readdir(workflowRoot, { withFileTypes: true });
-  return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
 }
 
 export async function uninstallWorkflow(params: {
@@ -175,11 +91,16 @@ export async function uninstallWorkflow(params: {
     if (!agentDir) {
       continue;
     }
-    // Remove the entire parent directory (e.g. ~/.openclaw/agents/bug-fix_triager/)
-    // since both agent/ and sessions/ inside it are antfarm-managed
+    if (await pathExists(agentDir)) {
+      await fs.rm(agentDir, { recursive: true, force: true });
+    }
+    // Also remove the parent directory if it's now empty
     const parentDir = path.dirname(agentDir);
     if (await pathExists(parentDir)) {
-      await fs.rm(parentDir, { recursive: true, force: true });
+      const remaining = await fs.readdir(parentDir).catch(() => ["placeholder"]);
+      if (remaining.length === 0) {
+        await fs.rm(parentDir, { recursive: true, force: true });
+      }
     }
   }
 
@@ -187,13 +108,12 @@ export async function uninstallWorkflow(params: {
 }
 
 export async function uninstallAllWorkflows(): Promise<void> {
-  // Stop the dashboard daemon before cleaning up files
-  stopDaemon();
-
   const { path: configPath, config } = await readOpenClawConfig();
   const list = Array.isArray(config.agents?.list) ? config.agents?.list : [];
-  const installedWorkflowIds = await listInstalledWorkflowIds();
-  const removedAgents = selectAntfarmManagedAgents(list, installedWorkflowIds);
+  const removedAgents = list.filter((entry) => {
+    const id = typeof entry.id === "string" ? entry.id : "";
+    return id.includes("/");
+  });
   if (config.agents) {
     config.agents.list = list.filter((entry) => !removedAgents.includes(entry));
   }
@@ -203,27 +123,6 @@ export async function uninstallAllWorkflows(): Promise<void> {
       .map((entry) => (typeof entry.id === "string" ? entry.id : ""))
       .filter(Boolean),
   );
-  if (config.cron?.sessionRetention === DEFAULT_CRON_SESSION_RETENTION) {
-    delete config.cron.sessionRetention;
-    if (Object.keys(config.cron).length === 0) {
-      delete config.cron;
-    }
-  }
-  if (config.session?.maintenance) {
-    const maintenance = config.session.maintenance;
-    const matchesDefaults =
-      maintenance.mode === DEFAULT_SESSION_MAINTENANCE.mode &&
-      (maintenance.pruneAfter === DEFAULT_SESSION_MAINTENANCE.pruneAfter ||
-        maintenance.pruneDays === undefined) &&
-      maintenance.maxEntries === DEFAULT_SESSION_MAINTENANCE.maxEntries &&
-      maintenance.rotateBytes === DEFAULT_SESSION_MAINTENANCE.rotateBytes;
-    if (matchesDefaults) {
-      delete config.session.maintenance;
-      if (Object.keys(config.session).length === 0) {
-        delete config.session;
-      }
-    }
-  }
   await writeOpenClawConfig(configPath, config);
 
   await removeMainAgentGuidance();
@@ -261,49 +160,24 @@ export async function uninstallAllWorkflows(): Promise<void> {
     if (!agentDir) {
       continue;
     }
-    // Remove the entire parent directory (e.g. ~/.openclaw/agents/bug-fix_triager/)
-    // since both agent/ and sessions/ inside it are antfarm-managed
+    if (await pathExists(agentDir)) {
+      await fs.rm(agentDir, { recursive: true, force: true });
+    }
+    // Also remove the parent directory if it's now empty
     const parentDir = path.dirname(agentDir);
     if (await pathExists(parentDir)) {
-      await fs.rm(parentDir, { recursive: true, force: true });
+      const remaining = await fs.readdir(parentDir).catch(() => ["placeholder"]);
+      if (remaining.length === 0) {
+        await fs.rm(parentDir, { recursive: true, force: true });
+      }
     }
   }
 
   const antfarmRoot = resolveAntfarmRoot();
   if (await pathExists(antfarmRoot)) {
-    // Clean up remaining runtime files (dashboard.pid, dashboard.log, events.jsonl, logs/)
-    for (const name of ["dashboard.pid", "dashboard.log", "events.jsonl", "logs"]) {
-      const p = path.join(antfarmRoot, name);
-      if (await pathExists(p)) {
-        await fs.rm(p, { recursive: true, force: true });
-      }
-    }
-    // Remove the directory if now empty
-    const entries = await fs.readdir(antfarmRoot).catch(() => ["placeholder"] as string[]);
+    const entries = await fs.readdir(antfarmRoot).catch(() => [] as string[]);
     if (entries.length === 0) {
       await fs.rm(antfarmRoot, { recursive: true, force: true });
     }
-  }
-
-  // Remove CLI symlink from ~/.local/bin
-  const { removeCliSymlink } = await import("./symlink.js");
-  removeCliSymlink();
-
-  // Remove npm link, build output, and node_modules.
-  // Note: this deletes dist/ which contains the currently running code.
-  // Safe because this is the final operation in the function.
-  const projectRoot = path.resolve(import.meta.dirname, "..", "..");
-  try {
-    execSync("npm unlink -g", { cwd: projectRoot, stdio: "ignore" });
-  } catch {
-    // link may not exist
-  }
-  const distDir = path.join(projectRoot, "dist");
-  if (await pathExists(distDir)) {
-    await fs.rm(distDir, { recursive: true, force: true });
-  }
-  const nodeModulesDir = path.join(projectRoot, "node_modules");
-  if (await pathExists(nodeModulesDir)) {
-    await fs.rm(nodeModulesDir, { recursive: true, force: true });
   }
 }
