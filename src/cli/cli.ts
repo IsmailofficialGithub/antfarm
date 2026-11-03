@@ -8,6 +8,23 @@ import { readRecentLogs } from "../lib/logger.js";
 import { startDaemon, stopDaemon, getDaemonStatus, isRunning } from "../server/daemonctl.js";
 import { claimStep, completeStep, failStep, getStories } from "../installer/step-ops.js";
 import { ensureCliSymlink } from "../installer/symlink.js";
+import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const pkgPath = join(__dirname, "..", "..", "package.json");
+
+function getVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 
 function printUsage() {
   process.stdout.write(
@@ -34,6 +51,9 @@ function printUsage() {
       "antfarm step stories <run-id>       List stories for a run",
       "",
       "antfarm logs [<lines>]               Show recent log entries",
+      "",
+      "antfarm version                      Show installed version",
+      "antfarm update                       Pull latest, rebuild, and reinstall workflows",
     ].join("\n") + "\n",
   );
 }
@@ -41,6 +61,43 @@ function printUsage() {
 async function main() {
   const args = process.argv.slice(2);
   const [group, action, target] = args;
+
+  if (group === "version" || group === "--version" || group === "-v") {
+    console.log(`antfarm v${getVersion()}`);
+    return;
+  }
+
+  if (group === "update") {
+    const repoRoot = join(__dirname, "..", "..");
+    console.log("Pulling latest...");
+    try {
+      execSync("git pull", { cwd: repoRoot, stdio: "inherit" });
+    } catch {
+      process.stderr.write("Failed to git pull. Are you in the antfarm repo?\n");
+      process.exit(1);
+    }
+    console.log("Installing dependencies...");
+    execSync("npm install", { cwd: repoRoot, stdio: "inherit" });
+    console.log("Building...");
+    execSync("npm run build", { cwd: repoRoot, stdio: "inherit" });
+
+    // Reinstall workflows
+    const workflows = await listBundledWorkflows();
+    if (workflows.length > 0) {
+      console.log(`Reinstalling ${workflows.length} workflow(s)...`);
+      for (const workflowId of workflows) {
+        try {
+          await installWorkflow({ workflowId });
+          console.log(`  ✓ ${workflowId}`);
+        } catch (err) {
+          console.log(`  ✗ ${workflowId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+    ensureCliSymlink();
+    console.log(`\nUpdated to v${getVersion()}.`);
+    return;
+  }
 
   if (group === "uninstall" && (!args[1] || args[1] === "--force")) {
     const force = args.includes("--force");
@@ -154,8 +211,16 @@ async function main() {
     }
     if (action === "complete") {
       if (!target) { process.stderr.write("Missing step-id.\n"); process.exit(1); }
-      // Read output from remaining args or stdin
-      const output = args.slice(3).join(" ").trim() || "";
+      // Read output from args or stdin
+      let output = args.slice(3).join(" ").trim();
+      if (!output) {
+        // Read from stdin (piped input)
+        const chunks: Buffer[] = [];
+        for await (const chunk of process.stdin) {
+          chunks.push(chunk);
+        }
+        output = Buffer.concat(chunks).toString("utf-8").trim();
+      }
       const result = completeStep(target, output);
       process.stdout.write(JSON.stringify(result) + "\n");
       return;
@@ -301,6 +366,49 @@ async function main() {
         db.prepare(
           "UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE id = ?"
         ).run(failedStory.id);
+      }
+    }
+
+    // Check if the failed step is a verify step linked to a loop step's verify_each
+    const loopStep = db.prepare(
+      "SELECT id, loop_config FROM steps WHERE run_id = ? AND type = 'loop' AND status IN ('running', 'failed') LIMIT 1"
+    ).get(run.id) as { id: string; loop_config: string | null } | undefined;
+
+    if (loopStep?.loop_config) {
+      const lc = JSON.parse(loopStep.loop_config);
+      if (lc.verifyEach && lc.verifyStep === failedStep.step_id) {
+        // Reset the loop step (developer) to pending so it re-claims the story and populates context
+        db.prepare(
+          "UPDATE steps SET status = 'pending', current_story_id = NULL, updated_at = datetime('now') WHERE id = ?"
+        ).run(loopStep.id);
+        // Reset verify step to waiting (fires after developer completes)
+        db.prepare(
+          "UPDATE steps SET status = 'waiting', current_story_id = NULL, updated_at = datetime('now') WHERE id = ?"
+        ).run(failedStep.id);
+        // Reset any failed stories to pending
+        db.prepare(
+          "UPDATE stories SET status = 'pending', updated_at = datetime('now') WHERE run_id = ? AND status = 'failed'"
+        ).run(run.id);
+
+        // Reset run to running
+        db.prepare(
+          "UPDATE runs SET status = 'running', updated_at = datetime('now') WHERE id = ?"
+        ).run(run.id);
+
+        // Ensure crons are running for this workflow
+        const { loadWorkflowSpec } = await import("../installer/workflow-spec.js");
+        const { resolveWorkflowDir } = await import("../installer/paths.js");
+        const { ensureWorkflowCrons } = await import("../installer/agent-cron.js");
+        try {
+          const workflowDir = resolveWorkflowDir(run.workflow_id);
+          const workflow = await loadWorkflowSpec(workflowDir);
+          await ensureWorkflowCrons(workflow);
+        } catch (err) {
+          process.stderr.write(`Warning: Could not start crons: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+
+        console.log(`Resumed run ${run.id.slice(0, 8)} — reset loop step "${loopStep.id.slice(0, 8)}" to pending, verify step "${failedStep.step_id}" to waiting`);
+        process.exit(0);
       }
     }
 

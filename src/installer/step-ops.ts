@@ -263,6 +263,9 @@ export function claimStep(agentId: string): ClaimResult {
         context["verify_feedback"] = "";
       }
 
+      // Persist story context vars to DB so verify_each steps can access them
+      db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), step.run_id);
+
       const resolvedInput = resolveTemplate(step.input_template, context);
       return { found: true, stepId: step.id, runId: step.run_id, resolvedInput };
     }
@@ -404,7 +407,7 @@ function handleVerifyEachCompletion(
 
     if (lastDoneStory) {
       const newRetry = lastDoneStory.retry_count + 1;
-      if (newRetry >= lastDoneStory.max_retries) {
+      if (newRetry > lastDoneStory.max_retries) {
         // Story retries exhausted — fail everything
         db.prepare("UPDATE stories SET status = 'failed', retry_count = ?, updated_at = datetime('now') WHERE id = ?").run(newRetry, lastDoneStory.id);
         db.prepare("UPDATE steps SET status = 'failed', updated_at = datetime('now') WHERE id = ?").run(loopStepId);
@@ -537,7 +540,7 @@ export function failStep(stepId: string, error: string): { retrying: boolean; ru
 
     if (story) {
       const newRetry = story.retry_count + 1;
-      if (newRetry >= story.max_retries) {
+      if (newRetry > story.max_retries) {
         // Story retries exhausted
         db.prepare("UPDATE stories SET status = 'failed', retry_count = ?, updated_at = datetime('now') WHERE id = ?").run(newRetry, story.id);
         db.prepare("UPDATE steps SET status = 'failed', output = ?, current_story_id = NULL, updated_at = datetime('now') WHERE id = ?").run(error, stepId);
@@ -556,7 +559,7 @@ export function failStep(stepId: string, error: string): { retrying: boolean; ru
   // Single step: existing logic
   const newRetryCount = step.retry_count + 1;
 
-  if (newRetryCount >= step.max_retries) {
+  if (newRetryCount > step.max_retries) {
     db.prepare(
       "UPDATE steps SET status = 'failed', output = ?, retry_count = ?, updated_at = datetime('now') WHERE id = ?"
     ).run(error, newRetryCount, stepId);
