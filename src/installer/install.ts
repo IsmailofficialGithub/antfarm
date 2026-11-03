@@ -47,7 +47,8 @@ function ensureMainAgentInList(
 }
 
 // ── Shared deny list: things no workflow agent should ever touch ──
-const ALWAYS_DENY = ["gateway", "cron", "message", "nodes", "canvas", "sessions_spawn", "sessions_send"];
+// Note: sessions_spawn is allowed — two-phase polling agents need it to hand off work to opus sessions
+const ALWAYS_DENY = ["gateway", "cron", "message", "nodes", "canvas", "sessions_send"];
 
 const DEFAULT_CRON_SESSION_RETENTION = "24h";
 const DEFAULT_SESSION_MAINTENANCE = {
@@ -221,8 +222,9 @@ function upsertAgent(
     subagents: SUBAGENT_POLICY,
   };
   if (agent.model) payload.model = agent.model;
-  const timeout = agent.timeoutSeconds ?? ROLE_POLICIES[agent.role]?.timeoutSeconds;
-  if (timeout !== undefined) payload.timeoutSeconds = timeout;
+  // Note: timeoutSeconds is NOT written to the agent config entry because
+  // OpenClaw's agent schema uses .strict() and rejects unknown keys.
+  // Timeouts are applied via cron job payload.timeoutSeconds instead.
   if (existing) Object.assign(existing, payload);
   else list.push(payload);
 }
@@ -248,10 +250,17 @@ export async function installWorkflow(params: { workflowId: string }): Promise<W
   ensureSessionMaintenance(config);
   const list = ensureAgentList(config);
   ensureMainAgentInList(list, config);
+  for (const agent of provisioned) {
+    const existing = list.find((entry) => entry.id === agent.id);
+    if (existing && !agent.id.startsWith(workflow.id + "_")) {
+      throw new Error(`Agent ID collision: "${agent.id}" already exists from a different source`);
+    }
+  }
   addSubagentAllowlist(config, provisioned.map((a) => a.id));
   for (const agent of provisioned) {
-    // Extract the local agent id (after the workflow prefix slash)
-    const localId = agent.id.includes("/") ? agent.id.split("/").pop()! : agent.id;
+    // Extract the local agent id (strip the workflow prefix + separator)
+    const prefix = workflow.id + "_";
+    const localId = agent.id.startsWith(prefix) ? agent.id.slice(prefix.length) : agent.id;
     const role = roleMap.get(localId) ?? inferRole(localId);
     upsertAgent(list, { ...agent, role });
   }
