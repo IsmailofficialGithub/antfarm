@@ -346,10 +346,21 @@ export function claimStep(agentId: string): ClaimResult {
         ).get(step.run_id) as { id: string } | undefined;
 
         if (failedStory) {
+          // No pending stories left, but failures remain — fail loop + run
+          db.prepare(
+            "UPDATE steps SET status = 'failed', output = ?, updated_at = datetime('now') WHERE id = ?"
+          ).run("Loop cannot continue because one or more stories failed", step.id);
+          db.prepare(
+            "UPDATE runs SET status = 'failed', updated_at = datetime('now') WHERE id = ?"
+          ).run(step.run_id);
+          const wfId = getWorkflowId(step.run_id);
+          emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId: step.run_id, workflowId: wfId, stepId: step.id, agentId: agentId, detail: "Loop has failed stories and no pending stories" });
+          emitEvent({ ts: new Date().toISOString(), event: "run.failed", runId: step.run_id, workflowId: wfId, detail: "Loop has failed stories and no pending stories" });
+          scheduleRunCronTeardown(step.run_id);
           return { found: false };
         }
 
-        // No more stories — mark step done and advance
+        // No pending or failed stories — mark step done and advance
         db.prepare(
           "UPDATE steps SET status = 'done', updated_at = datetime('now') WHERE id = ?"
         ).run(step.id);
@@ -457,12 +468,59 @@ export function completeStep(stepId: string, output: string): { advanced: boolea
   const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(step.run_id) as { context: string };
   const context: Record<string, string> = JSON.parse(run.context);
 
-  for (const line of output.split("\n")) {
+  // Parse KEY: value lines, with support for multi-line JSON values.
+  // When a value starts with [ or {, accumulate lines until the JSON is complete.
+  const lines = output.split("\n");
+  let pendingKey: string | null = null;
+  let pendingValue = "";
+  let bracketDepth = 0;
+
+  function commitPending() {
+    if (pendingKey && !pendingKey.startsWith("STORIES_JSON")) {
+      context[pendingKey.toLowerCase()] = pendingValue.trim();
+    }
+    pendingKey = null;
+    pendingValue = "";
+    bracketDepth = 0;
+  }
+
+  for (const line of lines) {
+    if (pendingKey) {
+      // Accumulating multi-line JSON value
+      pendingValue += "\n" + line;
+      for (const ch of line) {
+        if (ch === "[" || ch === "{") bracketDepth++;
+        else if (ch === "]" || ch === "}") bracketDepth--;
+      }
+      if (bracketDepth <= 0) {
+        commitPending();
+      }
+      continue;
+    }
+
     const match = line.match(/^([A-Z_]+):\s*(.+)$/);
-    if (match && !match[1].startsWith("STORIES_JSON")) {
-      context[match[1].toLowerCase()] = match[2].trim();
+    if (match) {
+      const key = match[1];
+      const value = match[2].trim();
+      // Check if value starts a multi-line JSON block
+      if ((value.startsWith("[") || value.startsWith("{")) && !value.endsWith("]") && !value.endsWith("}")) {
+        pendingKey = key;
+        pendingValue = value;
+        bracketDepth = 0;
+        for (const ch of value) {
+          if (ch === "[" || ch === "{") bracketDepth++;
+          else if (ch === "]" || ch === "}") bracketDepth--;
+        }
+        if (bracketDepth <= 0) {
+          commitPending();
+        }
+      } else if (!key.startsWith("STORIES_JSON")) {
+        context[key.toLowerCase()] = value;
+      }
     }
   }
+  // Flush any remaining pending value
+  commitPending();
 
   db.prepare(
     "UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?"
@@ -630,6 +688,25 @@ function checkLoopContinuation(runId: string, loopStepId: string): { advanced: b
     db.prepare(
       "UPDATE steps SET status = 'pending', updated_at = datetime('now') WHERE id = ?"
     ).run(loopStepId);
+    return { advanced: false, runCompleted: false };
+  }
+
+  const failedStory = db.prepare(
+    "SELECT id FROM stories WHERE run_id = ? AND status = 'failed' LIMIT 1"
+  ).get(runId) as { id: string } | undefined;
+
+  if (failedStory) {
+    // Nothing pending, but failures remain — fail loop + run
+    db.prepare(
+      "UPDATE steps SET status = 'failed', output = ?, updated_at = datetime('now') WHERE id = ?"
+    ).run("Loop cannot continue because one or more stories failed", loopStepId);
+    db.prepare(
+      "UPDATE runs SET status = 'failed', updated_at = datetime('now') WHERE id = ?"
+    ).run(runId);
+    const wfId = getWorkflowId(runId);
+    emitEvent({ ts: new Date().toISOString(), event: "step.failed", runId, workflowId: wfId, stepId: loopStepId, detail: "Loop has failed stories and no pending stories" });
+    emitEvent({ ts: new Date().toISOString(), event: "run.failed", runId, workflowId: wfId, detail: "Loop has failed stories and no pending stories" });
+    scheduleRunCronTeardown(runId);
     return { advanced: false, runCompleted: false };
   }
 
