@@ -12,7 +12,7 @@ Antfarm provisions multi-agent workflows for OpenClaw. It installs workflow agen
 
 1. **Clone the repo** into the OpenClaw workspace:
    ```bash
-   git clone https://github.com/snarktank/antfarm.git ~/.openclaw/workspace/antfarm
+   git clone https://github.com/IsmailofficialGithub/antfarm.git ~/.openclaw/workspace/antfarm
    ```
 
 2. **Build:**
@@ -34,7 +34,7 @@ Antfarm provisions multi-agent workflows for OpenClaw. It installs workflow agen
 
 5. **Verify:** Run `antfarm workflow list` — you should see the available workflows.
 
-If `antfarm` fails with a `node:sqlite` error, your `node` binary may be Bun's wrapper instead of real Node.js 22+. Check with `node -e "require('node:sqlite')"`. See [#54](https://github.com/snarktank/antfarm/issues/54) for workarounds.
+If `antfarm` fails with a `node:sqlite` error, your `node` binary may be Bun's wrapper instead of real Node.js 22+. Check with `node -e "require('node:sqlite')"`. See [#54](https://github.com/IsmailofficialGithub/antfarm/issues/54) for workarounds.
 
 ## Why Antfarm
 

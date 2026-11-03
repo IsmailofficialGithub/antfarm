@@ -6,7 +6,7 @@ Antfarm workflows run AI agents on your machine. That's powerful — and it mean
 
 ### Curated repository only
 
-Antfarm only installs workflows from this official repository (`snarktank/antfarm`). There is no mechanism to install workflows from arbitrary URLs, third-party repos, or remote sources. If it's not in this repo, it doesn't run.
+Antfarm only installs workflows from this official repository (`IsmailofficialGithub/antfarm`). There is no mechanism to install workflows from arbitrary URLs, third-party repos, or remote sources. If it's not in this repo, it doesn't run.
 
 ### Every workflow is reviewed
 

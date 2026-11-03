@@ -1,6 +1,6 @@
 # Antfarm
 
-<img src="https://raw.githubusercontent.com/snarktank/antfarm/main/landing/logo.jpeg" alt="Antfarm" width="80">
+<img src="https://raw.githubusercontent.com/IsmailofficialGithub/antfarm/main/landing/logo.jpeg" alt="Antfarm" width="80">
 
 **Build your agent team in [OpenClaw](https://docs.openclaw.ai) with one command.**
 
@@ -9,16 +9,16 @@ You don't need to hire a dev team. You need to define one. Antfarm gives you a t
 ### Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/snarktank/antfarm/v0.5.1/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/IsmailofficialGithub/antfarm/v0.5.1/scripts/install.sh | bash
 ```
 
-Or just tell your OpenClaw agent: **"install github.com/snarktank/antfarm"**
+Or just tell your OpenClaw agent: **"install github.com/IsmailofficialGithub/antfarm"**
 
 That's it. Run `antfarm workflow list` to see available workflows.
 
 > **Not on npm.** Antfarm is installed from GitHub, not the npm registry. There is an unrelated `antfarm` package on npm — that's not this.
 
-> **Requires Node.js >= 22.** If `antfarm` fails with a `node:sqlite` error, make sure you're running real Node.js 22+, not Bun's node wrapper (see [#54](https://github.com/snarktank/antfarm/issues/54)).
+> **Requires Node.js >= 22.** If `antfarm` fails with a `node:sqlite` error, make sure you're running real Node.js 22+, not Bun's node wrapper (see [#54](https://github.com/IsmailofficialGithub/antfarm/issues/54)).
 
 ---
 
@@ -71,9 +71,9 @@ YAML + SQLite + cron. That's it. No Redis, no Kafka, no container orchestrator. 
 
 ### Built on the Ralph loop
 
-<img src="https://raw.githubusercontent.com/snarktank/ralph/main/ralph.webp" alt="Ralph" width="100">
+<img src="https://raw.githubusercontent.com/IsmailofficialGithub/ralph/main/ralph.webp" alt="Ralph" width="100">
 
-Each agent runs in a fresh session with clean context. Memory persists through git history and progress files — the same autonomous loop pattern from [Ralph](https://github.com/snarktank/ralph), scaled to multi-agent workflows.
+Each agent runs in a fresh session with clean context. Memory persists through git history and progress files — the same autonomous loop pattern from [Ralph](https://github.com/IsmailofficialGithub/ralph), scaled to multi-agent workflows.
 
 ---
 
@@ -134,7 +134,7 @@ Full guide: [docs/creating-workflows.md](docs/creating-workflows.md)
 
 You're installing agent teams that run code on your machine. We take that seriously.
 
-- **Curated repo only** — Antfarm only installs workflows from the official [snarktank/antfarm](https://github.com/snarktank/antfarm) repository. No arbitrary remote sources.
+- **Curated repo only** — Antfarm only installs workflows from the official [IsmailofficialGithub/antfarm](https://github.com/IsmailofficialGithub/antfarm) repository. No arbitrary remote sources.
 - **Reviewed for prompt injection** — Every workflow is reviewed for prompt injection attacks and malicious agent files before merging.
 - **Community contributions welcome** — Want to add a workflow? Submit a PR. All submissions go through careful security review before they ship.
 - **Transparent by default** — Every workflow is plain YAML and Markdown. You can read exactly what each agent will do before you install it.
@@ -145,9 +145,9 @@ You're installing agent teams that run code on your machine. We take that seriou
 
 Monitor runs, track step progress, and view agent output in real time.
 
-![Antfarm dashboard](https://raw.githubusercontent.com/snarktank/antfarm/main/assets/dashboard-screenshot.png)
+![Antfarm dashboard](https://raw.githubusercontent.com/IsmailofficialGithub/antfarm/main/assets/dashboard-screenshot.png)
 
-![Antfarm dashboard detail](https://raw.githubusercontent.com/snarktank/antfarm/main/assets/dashboard-detail-screenshot.png)
+![Antfarm dashboard detail](https://raw.githubusercontent.com/IsmailofficialGithub/antfarm/main/assets/dashboard-detail-screenshot.png)
 
 ```bash
 antfarm dashboard              # Start on port 3333

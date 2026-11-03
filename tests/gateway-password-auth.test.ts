@@ -5,7 +5,7 @@ import path from "node:path";
 import os from "node:os";
 
 /**
- * Regression test for https://github.com/snarktank/antfarm/issues/116
+ * Regression test for https://github.com/IsmailofficialGithub/antfarm/issues/116
  *
  * When OpenClaw gateway is configured with auth.mode "password" (instead of
  * "token"), antfarm's cron setup was sending NO Authorization header at all,
