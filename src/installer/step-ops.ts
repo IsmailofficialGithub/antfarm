@@ -4,10 +4,50 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { execSync, execFileSync } from "node:child_process";
 import { teardownWorkflowCronsIfIdle } from "./agent-cron.js";
 import { emitEvent } from "./events.js";
 import { logger } from "../lib/logger.js";
 import { getMaxRoleTimeoutSeconds } from "./install.js";
+import { isFrontendChange } from "../lib/frontend-detect.js";
+
+/**
+ * Parse KEY: value lines from step output with support for multi-line values.
+ * Accumulates continuation lines until the next KEY: boundary or end of output.
+ * Returns a map of lowercase keys to their (trimmed) values.
+ * Skips STORIES_JSON keys (handled separately).
+ */
+export function parseOutputKeyValues(output: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const lines = output.split("\n");
+  let pendingKey: string | null = null;
+  let pendingValue = "";
+
+  function commitPending() {
+    if (pendingKey && !pendingKey.startsWith("STORIES_JSON")) {
+      result[pendingKey.toLowerCase()] = pendingValue.trim();
+    }
+    pendingKey = null;
+    pendingValue = "";
+  }
+
+  for (const line of lines) {
+    const match = line.match(/^([A-Z_]+):\s*(.*)$/);
+    if (match) {
+      // New KEY: line found — flush previous key
+      commitPending();
+      pendingKey = match[1];
+      pendingValue = match[2];
+    } else if (pendingKey) {
+      // Continuation line — append to current key's value
+      pendingValue += "\n" + line;
+    }
+  }
+  // Flush any remaining pending value
+  commitPending();
+
+  return result;
+}
 
 /**
  * Fire-and-forget cron teardown when a run ends.
@@ -73,7 +113,11 @@ function readProgressFile(runId: string): string {
   const workspace = getAgentWorkspacePath(loopStep.agent_id);
   if (!workspace) return "(no progress file)";
   try {
-    return fs.readFileSync(path.join(workspace, "progress.txt"), "utf-8");
+    // Try run-scoped file first, fall back to legacy progress.txt
+    const scopedPath = path.join(workspace, `progress-${runId}.txt`);
+    const legacyPath = path.join(workspace, "progress.txt");
+    const filePath = fs.existsSync(scopedPath) ? scopedPath : legacyPath;
+    return fs.readFileSync(filePath, "utf-8");
   } catch {
     return "(no progress yet)";
   }
@@ -202,8 +246,9 @@ const MAX_ABANDON_RESETS = 5; // abandoned steps get more chances than explicit 
 /**
  * Find steps that have been "running" for too long and reset them to pending.
  * This catches cases where an agent claimed a step but never completed/failed it.
+ * Exported so it can be called from medic/health-check crons independently of claimStep.
  */
-function cleanupAbandonedSteps(): void {
+export function cleanupAbandonedSteps(): void {
   const db = getDb();
   // Use numeric comparison so mixed timestamp formats don't break ordering.
   const thresholdMs = ABANDONED_THRESHOLD_MS;
@@ -315,6 +360,46 @@ function cleanupAbandonedSteps(): void {
   }
 }
 
+// ── Frontend change detection ───────────────────────────────────────
+
+/**
+ * Compute whether a branch has frontend changes relative to main.
+ * Returns 'true' or 'false' as a string for template context.
+ */
+export function computeHasFrontendChanges(repo: string, branch: string): string {
+  try {
+    const output = execFileSync("git", ["diff", "--name-only", `main..${branch}`], {
+      cwd: repo,
+      encoding: "utf-8",
+      timeout: 10_000,
+    });
+    const files = output.trim().split("\n").filter(f => f.length > 0);
+    return isFrontendChange(files) ? "true" : "false";
+  } catch {
+    return "false";
+  }
+}
+
+// ── Peek (lightweight work check) ───────────────────────────────────
+
+export type PeekResult = "HAS_WORK" | "NO_WORK";
+
+/**
+ * Lightweight check: does this agent have any pending/waiting steps in active runs?
+ * Unlike claimStep(), this runs a single cheap COUNT query — no cleanup, no context resolution.
+ * Returns "HAS_WORK" if any pending/waiting steps exist, "NO_WORK" otherwise.
+ */
+export function peekStep(agentId: string): PeekResult {
+  const db = getDb();
+  const row = db.prepare(
+    `SELECT COUNT(*) as cnt FROM steps s
+     JOIN runs r ON r.id = s.run_id
+     WHERE s.agent_id = ? AND s.status IN ('pending', 'waiting')
+       AND r.status = 'running'`
+  ).get(agentId) as { cnt: number };
+  return row.cnt > 0 ? "HAS_WORK" : "NO_WORK";
+}
+
 // ── Claim ───────────────────────────────────────────────────────────
 
 interface ClaimResult {
@@ -325,11 +410,21 @@ interface ClaimResult {
 }
 
 /**
+ * Throttle cleanupAbandonedSteps: run at most once every 5 minutes.
+ */
+let lastCleanupTime = 0;
+const CLEANUP_THROTTLE_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
  * Find and claim a pending step for an agent, returning the resolved input.
  */
 export function claimStep(agentId: string): ClaimResult {
-  // First, cleanup any abandoned steps
-  cleanupAbandonedSteps();
+  // Throttle cleanup: run at most once every 5 minutes across all agents
+  const now = Date.now();
+  if (now - lastCleanupTime >= CLEANUP_THROTTLE_MS) {
+    cleanupAbandonedSteps();
+    lastCleanupTime = now;
+  }
   const db = getDb();
 
   const step = db.prepare(
@@ -350,6 +445,16 @@ export function claimStep(agentId: string): ClaimResult {
   // Get run context
   const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(step.run_id) as { context: string } | undefined;
   const context: Record<string, string> = run ? JSON.parse(run.context) : {};
+
+  // Always inject run_id so templates can use {{run_id}} (e.g. for scoped progress files)
+  context["run_id"] = step.run_id;
+
+  // Compute has_frontend_changes from git diff when repo and branch are available
+  if (context["repo"] && context["branch"]) {
+    context["has_frontend_changes"] = computeHasFrontendChanges(context["repo"], context["branch"]);
+  } else {
+    context["has_frontend_changes"] = "false";
+  }
 
   // T6: Loop step claim logic
   if (step.type === "loop") {
@@ -435,7 +540,7 @@ export function claimStep(agentId: string): ClaimResult {
       db.prepare("UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify(context), step.run_id);
 
       const resolvedInput = resolveTemplate(step.input_template, context);
-      return { found: true, stepId: step.step_id, runId: step.run_id, resolvedInput };
+      return { found: true, stepId: step.id, runId: step.run_id, resolvedInput };
     }
   }
 
@@ -458,7 +563,7 @@ export function claimStep(agentId: string): ClaimResult {
 
   return {
     found: true,
-    stepId: step.step_id,
+    stepId: step.id,
     runId: step.run_id,
     resolvedInput,
   };
@@ -488,59 +593,11 @@ export function completeStep(stepId: string, output: string): { advanced: boolea
   const run = db.prepare("SELECT context FROM runs WHERE id = ?").get(step.run_id) as { context: string };
   const context: Record<string, string> = JSON.parse(run.context);
 
-  // Parse KEY: value lines, with support for multi-line JSON values.
-  // When a value starts with [ or {, accumulate lines until the JSON is complete.
-  const lines = output.split("\n");
-  let pendingKey: string | null = null;
-  let pendingValue = "";
-  let bracketDepth = 0;
-
-  function commitPending() {
-    if (pendingKey && !pendingKey.startsWith("STORIES_JSON")) {
-      context[pendingKey.toLowerCase()] = pendingValue.trim();
-    }
-    pendingKey = null;
-    pendingValue = "";
-    bracketDepth = 0;
+  // Parse KEY: value lines and merge into context
+  const parsed = parseOutputKeyValues(output);
+  for (const [key, value] of Object.entries(parsed)) {
+    context[key] = value;
   }
-
-  for (const line of lines) {
-    if (pendingKey) {
-      // Accumulating multi-line JSON value
-      pendingValue += "\n" + line;
-      for (const ch of line) {
-        if (ch === "[" || ch === "{") bracketDepth++;
-        else if (ch === "]" || ch === "}") bracketDepth--;
-      }
-      if (bracketDepth <= 0) {
-        commitPending();
-      }
-      continue;
-    }
-
-    const match = line.match(/^([A-Z_]+):\s*(.+)$/);
-    if (match) {
-      const key = match[1];
-      const value = match[2].trim();
-      // Check if value starts a multi-line JSON block
-      if ((value.startsWith("[") || value.startsWith("{")) && !value.endsWith("]") && !value.endsWith("}")) {
-        pendingKey = key;
-        pendingValue = value;
-        bracketDepth = 0;
-        for (const ch of value) {
-          if (ch === "[" || ch === "{") bracketDepth++;
-          else if (ch === "]" || ch === "}") bracketDepth--;
-        }
-        if (bracketDepth <= 0) {
-          commitPending();
-        }
-      } else if (!key.startsWith("STORIES_JSON")) {
-        context[key.toLowerCase()] = value;
-      }
-    }
-  }
-  // Flush any remaining pending value
-  commitPending();
 
   db.prepare(
     "UPDATE runs SET context = ?, updated_at = datetime('now') WHERE id = ?"
@@ -806,13 +863,16 @@ export function archiveRunProgress(runId: string): void {
   const workspace = getAgentWorkspacePath(loopStep.agent_id);
   if (!workspace) return;
 
-  const progressPath = path.join(workspace, "progress.txt");
+  const scopedPath = path.join(workspace, `progress-${runId}.txt`);
+  const legacyPath = path.join(workspace, "progress.txt");
+  // Prefer run-scoped file, fall back to legacy
+  const progressPath = fs.existsSync(scopedPath) ? scopedPath : legacyPath;
   if (!fs.existsSync(progressPath)) return;
 
   const archiveDir = path.join(workspace, "archive", runId);
   fs.mkdirSync(archiveDir, { recursive: true });
   fs.copyFileSync(progressPath, path.join(archiveDir, "progress.txt"));
-  fs.writeFileSync(progressPath, ""); // truncate
+  fs.unlinkSync(progressPath); // clean up
 }
 
 /**
